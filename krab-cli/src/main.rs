@@ -1,20 +1,19 @@
-use clap::{Parser, Subcommand};
-use colored::Colorize;
-use inquire::{Password, Select, Text};
-use krab_core::{Vault, Entry, EntryType, Field, FieldKind};
-use std::path::PathBuf;
-use std::process;
+mod ui;
 
-const ASCII_CRAB: &str = r#"
-    /\_/\  /\_/   ( o.o )( o.o )
-    > ^ <  > ^ <
-  /|     ||     |\
- (_|_____|_____|_)
-     k r a b
-"#;
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use clap::{Parser, Subcommand};
+use inquire::validator::Validation;
+use inquire::{CustomUserError, Password, PasswordDisplayMode, Select, Text};
+use krab_core::{Entry, EntryType, Field, FieldKind, Vault};
 
 #[derive(Parser)]
-#[command(name = "krab", version = "0.1.0", about = "Локальное зашифрованное хранилище секретов", long_about = None)]
+#[command(
+    name = "krab",
+    version,
+    about = "Локальное зашифрованное хранилище секретов"
+)]
 struct Cli {
     /// Путь к файлу хранилища
     #[arg(short, long, env = "KRAB_VAULT", default_value = "vault.krabic")]
@@ -35,166 +34,236 @@ enum Commands {
 }
 
 fn main() {
+    ui::init();
     let cli = Cli::parse();
 
-    match &cli.command {
-        Commands::Init => {
-            println!("{}", ASCII_CRAB.truecolor(255, 87, 34)); // Orange crab
-            println!("Создание нового хранилища по пути: {}", cli.vault.display().to_string().cyan());
-            
-            let password = match Password::new("Придумайте мастер-пароль:").without_confirmation().prompt() {
-                Ok(p) => p,
-                Err(_) => process::exit(1),
-            };
-            
-            if password.is_empty() {
-                eprintln!("{}", "✗ Пароль не может быть пустым.".red());
-                process::exit(1);
-            }
+    match cli.command {
+        Commands::Init => cmd_init(&cli.vault),
+        Commands::List => cmd_list(&cli.vault),
+        Commands::Add => cmd_add(&cli.vault),
+    }
+}
 
-            let confirm = match Password::new("Повторите пароль:").without_confirmation().prompt() {
-                Ok(p) => p,
-                Err(_) => process::exit(1),
-            };
+// ---------------------------------------------------------------- команды
 
-            if password != confirm {
-                eprintln!("{}", "✗ Пароли не совпадают.".red());
-                process::exit(1);
-            }
+fn cmd_init(path: &Path) {
+    ui::banner();
+    ui::info(&format!("Новое хранилище: {}", path.display()));
 
-            println!("{}", "⚡ Калибровка защиты под вашу систему (это займет около секунды)...".yellow());
-            
-            match Vault::create_calibrated(&cli.vault, password.as_bytes()) {
-                Ok(_) => println!("{}", "✓ Хранилище успешно создано!".green().bold()),
-                Err(e) => {
-                    eprintln!("{} {}", "✗ Ошибка создания:".red(), e);
-                    process::exit(1);
-                }
+    let password = ui::ask(
+        Password::new("Придумайте мастер-пароль:")
+            .with_display_mode(PasswordDisplayMode::Masked)
+            .with_custom_confirmation_message("Повторите пароль:")
+            .with_custom_confirmation_error_message("Пароли не совпадают.")
+            .with_validator(non_empty("Пароль не может быть пустым."))
+            .with_help_message("Забудете его, данные не восстановить")
+            .prompt(),
+    );
+
+    if password.chars().count() < 10 {
+        ui::warn("Пароль короткий. Для мастер-пароля лучше длинная фраза.");
+    }
+
+    let pb = ui::spinner("Подбираю параметры защиты под эту машину…");
+    let created = Vault::create_calibrated(path, password.as_bytes());
+    pb.finish_and_clear();
+
+    match created {
+        Ok(_) => {
+            ui::ok("Хранилище создано");
+            ui::hint("Добавить запись: krab add   ·   Показать список: krab list");
+        }
+        Err(e) => ui::fail(&format!("Не удалось создать хранилище: {e}")),
+    }
+}
+
+fn cmd_list(path: &Path) {
+    ui::header(path);
+    let vault = open_vault(path);
+
+    let entries = vault.entries();
+    if entries.is_empty() {
+        ui::info("Хранилище пусто");
+        ui::hint("Добавить запись: krab add");
+        return;
+    }
+
+    println!("{}", ui::entries_table(entries));
+    ui::info(&format!("Записей: {}", entries.len()));
+}
+
+fn cmd_add(path: &Path) {
+    ui::header(path);
+    let mut vault = open_vault(path);
+
+    let kind = ui::ask(Select::new("Тип записи:", Kind::ALL.to_vec()).prompt());
+    let entry_type = kind.entry_type();
+
+    let title = ui::ask(
+        Text::new("Название:")
+            .with_validator(non_empty("Название не может быть пустым."))
+            .prompt(),
+    );
+    let mut entry = Entry::new(entry_type, title.trim());
+
+    match kind {
+        Kind::Login => {
+            push_field(
+                &mut entry,
+                "url",
+                FieldKind::Url,
+                optional_text("URL / сайт:"),
+            );
+            push_field(
+                &mut entry,
+                "username",
+                FieldKind::Text,
+                optional_text("Логин:"),
+            );
+            push_field(
+                &mut entry,
+                "password",
+                FieldKind::Secret,
+                optional_secret("Пароль:"),
+            );
+        }
+        Kind::Note => {
+            push_field(
+                &mut entry,
+                "text",
+                FieldKind::Multiline,
+                optional_text("Текст заметки:"),
+            );
+        }
+        Kind::Key => {
+            push_field(
+                &mut entry,
+                "key",
+                FieldKind::Secret,
+                optional_secret("Секретный ключ:"),
+            );
+        }
+        Kind::Totp => {
+            push_field(
+                &mut entry,
+                "totp_secret",
+                FieldKind::Totp,
+                optional_secret("TOTP-секрет:"),
+            );
+        }
+        Kind::Other => {}
+    }
+
+    if let Some(tags) = optional_text("Теги через запятую:") {
+        for tag in tags.split(',') {
+            let tag = tag.trim();
+            if !tag.is_empty() {
+                entry.tags.push(tag.to_string());
             }
         }
-        Commands::List => {
-            let password = match Password::new("Мастер-пароль:").without_confirmation().prompt() {
-                Ok(p) => p,
-                Err(_) => process::exit(1),
-            };
+    }
 
-            let vault = match Vault::open(&cli.vault, password.as_bytes()) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("{} {}", "✗ Ошибка открытия:".red(), e);
-                    process::exit(1);
-                }
-            };
+    vault.add(entry);
+    match vault.save() {
+        Ok(_) => ui::ok("Запись добавлена"),
+        Err(e) => ui::fail(&format!("Не удалось сохранить: {e}")),
+    }
+}
 
-            let entries = vault.entries();
-            if entries.is_empty() {
-                println!("{}", "Хранилище пусто.".yellow());
-            } else {
-                println!("Найдено записей: {}", entries.len().to_string().cyan());
-                for entry in entries {
-                    println!("- [{}] {} ({})", entry.entry_type.as_str().cyan(), entry.title, entry.id.to_string().bright_black());
-                }
-            }
+// ---------------------------------------------------------------- общее
+
+/// Спросить мастер-пароль и открыть хранилище (со спиннером на время Argon2).
+fn open_vault(path: &Path) -> Vault {
+    if !path.exists() {
+        ui::fail(&format!(
+            "Хранилище не найдено: {}. Создайте его командой: krab init",
+            path.display()
+        ));
+    }
+
+    let password = ui::ask(
+        Password::new("Мастер-пароль:")
+            .with_display_mode(PasswordDisplayMode::Masked)
+            .without_confirmation()
+            .prompt(),
+    );
+
+    let pb = ui::spinner("Расшифровываю хранилище…");
+    let opened = Vault::open(path, password.as_bytes());
+    pb.finish_and_clear();
+
+    match opened {
+        Ok(v) => v,
+        Err(e) => ui::fail(&format!("Не удалось открыть хранилище: {e}")),
+    }
+}
+
+fn non_empty(
+    message: &'static str,
+) -> impl Fn(&str) -> Result<Validation, CustomUserError> + Clone {
+    move |input: &str| {
+        if input.trim().is_empty() {
+            Ok(Validation::Invalid(message.into()))
+        } else {
+            Ok(Validation::Valid)
         }
-        Commands::Add => {
-            let password = match Password::new("Мастер-пароль:").without_confirmation().prompt() {
-                Ok(p) => p,
-                Err(_) => process::exit(1),
-            };
+    }
+}
 
-            let mut vault = match Vault::open(&cli.vault, password.as_bytes()) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("{} {}", "✗ Ошибка открытия:".red(), e);
-                    process::exit(1);
-                }
-            };
+/// Необязательный текст: Enter или Esc пропускают поле, Ctrl+C отменяет всё.
+fn optional_text(prompt: &str) -> Option<String> {
+    let answer = ui::ask(
+        Text::new(prompt)
+            .with_help_message("Необязательно, Enter чтобы пропустить")
+            .prompt_skippable(),
+    );
+    answer.filter(|s| !s.trim().is_empty())
+}
 
-            let options = vec!["🔑 Login", "📝 Note", "🗝️ Key", "⏱️ TOTP", "📦 Other"];
-            let choice = match Select::new("Тип записи:", options).prompt() {
-                Ok(c) => c,
-                Err(_) => process::exit(1),
-            };
+/// То же для секретов: ввод скрыт точками.
+fn optional_secret(prompt: &str) -> Option<String> {
+    let answer = ui::ask(
+        Password::new(prompt)
+            .with_display_mode(PasswordDisplayMode::Masked)
+            .without_confirmation()
+            .with_help_message("Необязательно, Enter чтобы пропустить")
+            .prompt_skippable(),
+    );
+    answer.filter(|s| !s.is_empty())
+}
 
-            let entry_type = match choice {
-                "🔑 Login" => EntryType::Login,
-                "📝 Note" => EntryType::Note,
-                "🗝️ Key" => EntryType::Key,
-                "⏱️ TOTP" => EntryType::Totp,
-                _ => EntryType::Other,
-            };
+fn push_field(entry: &mut Entry, label: &str, kind: FieldKind, value: Option<String>) {
+    if let Some(value) = value {
+        entry.fields.push(Field::new(label, value, kind));
+    }
+}
 
-            let title = match Text::new("Название:").prompt() {
-                Ok(t) => t,
-                Err(_) => process::exit(1),
-            };
+/// Тип записи в меню выбора. Показываемый текст и значение не смешиваются.
+#[derive(Clone, Copy)]
+enum Kind {
+    Login,
+    Note,
+    Key,
+    Totp,
+    Other,
+}
 
-            if title.is_empty() {
-                eprintln!("{}", "✗ Название не может быть пустым.".red());
-                process::exit(1);
-            }
+impl Kind {
+    const ALL: [Kind; 5] = [Kind::Login, Kind::Note, Kind::Key, Kind::Totp, Kind::Other];
 
-            let mut entry = Entry::new(entry_type.clone(), &title);
-
-            match entry_type {
-                EntryType::Login => {
-                    if let Ok(url) = Text::new("URL/Сайт (опционально):").prompt() {
-                        if !url.is_empty() {
-                            entry.fields.push(Field::new("url", url, FieldKind::Url));
-                        }
-                    }
-                    if let Ok(username) = Text::new("Логин:").prompt() {
-                        if !username.is_empty() {
-                            entry.fields.push(Field::new("username", username, FieldKind::Text));
-                        }
-                    }
-                    if let Ok(pass) = Password::new("Пароль:").without_confirmation().prompt() {
-                        if !pass.is_empty() {
-                            entry.fields.push(Field::new("password", pass, FieldKind::Secret));
-                        }
-                    }
-                }
-                EntryType::Note => {
-                    if let Ok(text) = Text::new("Текст заметки:").prompt() {
-                        if !text.is_empty() {
-                            entry.fields.push(Field::new("text", text, FieldKind::Multiline));
-                        }
-                    }
-                }
-                EntryType::Key => {
-                    if let Ok(key) = Password::new("Секретный ключ:").without_confirmation().prompt() {
-                        if !key.is_empty() {
-                            entry.fields.push(Field::new("key", key, FieldKind::Secret));
-                        }
-                    }
-                }
-                EntryType::Totp => {
-                    if let Ok(secret) = Password::new("TOTP секрет:").without_confirmation().prompt() {
-                        if !secret.is_empty() {
-                            entry.fields.push(Field::new("totp_secret", secret, FieldKind::Totp));
-                        }
-                    }
-                }
-                _ => {}
-            }
-
-            if let Ok(tags_input) = Text::new("Теги (через запятую, опционально):").prompt() {
-                for tag in tags_input.split(',') {
-                    let tag = tag.trim();
-                    if !tag.is_empty() {
-                        entry.tags.push(tag.to_string());
-                    }
-                }
-            }
-
-            vault.add(entry);
-            match vault.save() {
-                Ok(_) => println!("{}", "✓ Запись добавлена!".green().bold()),
-                Err(e) => {
-                    eprintln!("{} {}", "✗ Ошибка сохранения:".red(), e);
-                    process::exit(1);
-                }
-            }
+    fn entry_type(self) -> EntryType {
+        match self {
+            Kind::Login => EntryType::Login,
+            Kind::Note => EntryType::Note,
+            Kind::Key => EntryType::Key,
+            Kind::Totp => EntryType::Totp,
+            Kind::Other => EntryType::Other,
         }
+    }
+}
+
+impl fmt::Display for Kind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(ui::type_label(&self.entry_type()))
     }
 }
