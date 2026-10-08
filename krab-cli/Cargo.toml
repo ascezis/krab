@@ -1,0 +1,12 @@
+[package]
+name = "krab-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+colored = "2"
+comfy-table = "7"
+indicatif = "0.17"
+inquire = "0.7"
+krab-core = { version = "0.1.0", path = "../krab-core" }

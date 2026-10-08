@@ -19,7 +19,7 @@ pub mod vault;
 // Типы и значения, которые нужны снаружи (CLI, тесты).
 // Внутренняя кухня (header, kdf, storage) снаружи не видна.
 pub use error::{Error, Result};
-pub use kdf::{KdfParams, MEMORY_MIN_KIB};
 pub use header::{HEADER_LEN, NONCE_LEN};
+pub use kdf::{KdfParams, MEMORY_MIN_KIB};
 pub use model::{Entry, EntryType, Field, FieldKind};
 pub use vault::Vault;
