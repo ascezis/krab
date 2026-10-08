@@ -1,0 +1,16 @@
+/target
+
+# Rust build artifacts (all crates)
+krab-core/target/
+
+# Vault files - never in repo
+*.krabic
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,19 @@
+[package]
+name = "krab-core"
+version = "0.1.0"
+edition = "2021"
+description = "Ядро krab: формат файла хранилища, криптография, модель данных"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+chacha20poly1305 = "0.10"
+argon2 = { version = "0.5", features = ["zeroize"] }
+ciborium = "0.2"
+zeroize = { version = "1", features = ["derive"] }
+getrandom = "0.2"
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
