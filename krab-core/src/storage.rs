@@ -28,7 +28,7 @@ pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     // Фиксируем само переименование. Это best-effort: данные уже на месте,
     // а на некоторых ФС fsync каталога не поддерживается.
     #[cfg(unix)]
-    if let Ok(d) = File::open(dir) {
+    if let Ok(d) = fs::File::open(dir) {
         let _ = d.sync_all();
     }
     Ok(())
