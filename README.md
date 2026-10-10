@@ -1,5 +1,9 @@
 # krab 🦀
 
+[![CI](https://github.com/ascezis/krab/actions/workflows/ci.yml/badge.svg)](https://github.com/ascezis/krab/actions/workflows/ci.yml)
+![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
+![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue.svg)
+
 ```text
 ╭────────────────────────────────────────────────╮
 │  ▄▀▀▀▄ ◉       ◉ ▄▀▀▀▄                        │
